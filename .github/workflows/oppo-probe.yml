@@ -23,7 +23,7 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -prop ro.product.model=CPH2841 -prop ro.product.device=OP627CL1 -prop ro.product.name=CPH2841EEA -prop ro.product.manufacturer=OPPO -prop ro.product.brand=OPPO -prop ro.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys
           script: bash probe.sh
 
       - name: Upload probe results
