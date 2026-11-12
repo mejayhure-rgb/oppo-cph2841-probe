@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v4 — runs in the GitHub Actions job against an
+# OPPO CPH2841 identity probe v7 — runs in the GitHub Actions job against an
 # emulator the workflow launched manually with -writable-system.
+# Run #8 (v6) SUCCEEDED: second remount flipped the overlays rw,
+# SYSTEM_WRITABLE=yes, PROBE_RESULT=IDENTITY_APPLIED with the full verified
+# CPH2841 prop set persisting across reboot. v7 keeps the v6 identity flow,
+# adds the system_dlkm build.prop + ro.build.flavor/product props (second-order
+# leftovers named in run #8's full getprop audit; ro.bootimage.* still needs
+# ramdisk work), and adds Phase 5: fetch the Google One APK (APKPure direct),
+# print its signer cert via apksigner (workflow v3.4 installs build-tools),
+# install it, set the global device name, launch it WITHOUT any account, and
+# capture the first screen + package info + filtered logcat — the pre-sign-in
+# offer surface. The eligibility verdict itself still needs a throwaway
+# account, which is a later phase.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
@@ -132,6 +143,13 @@ apply() {
     "ro.build.version.security_patch=2026-08-01" \
     "ro.build.version.release=16" \
     "ro.build.description=CPH2841EEA-user 16 BP2A.250605.015 B.R4T2.aef3b8_1a19661_1a14cbd release-keys" \
+    "ro.build.flavor=CPH2841EEA-user" \
+    "ro.build.product=OP627CL1" \
+    "ro.product.system_dlkm.model=CPH2841" \
+    "ro.product.system_dlkm.device=OP627CL1" \
+    "ro.product.system_dlkm.name=CPH2841EEA" \
+    "ro.product.system_dlkm.manufacturer=OPPO" \
+    "ro.product.system_dlkm.brand=OPPO" \
   ; do
     k="${kv%%=*}"
     if grep -q "^${k}=" "$f"; then
@@ -143,6 +161,7 @@ apply() {
 }
 apply /system/build.prop
 apply /system/system_ext/etc/build.prop
+apply /system/system_dlkm/etc/build.prop
 apply /vendor/build.prop
 apply /vendor/odm/etc/build.prop
 apply /product/etc/build.prop
@@ -166,6 +185,30 @@ adb shell pm list packages | grep -iE 'google|vending|gms|android.gms' | sort | 
 adb shell monkey -p com.android.vending -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
 sleep 5
 adb exec-out screencap -p > "$OUT/screen-playstore-spoofed.png" || true
+
+echo "### Phase 5: Google One install + offer surface (no sign-in)"
+APK=/tmp/google-one.apk
+fetch_ok=no
+echo "--- trying APKPure direct download for com.google.android.apps.subscriptions.red"
+if curl -L --fail --max-time 240 -A "Mozilla/5.0 (X11; Linux x86_64)" -o "$APK" "https://d.apkpure.com/b/APK/com.google.android.apps.subscriptions.red?version=latest" && [ -s "$APK" ]; then
+  if file "$APK" | grep -qi "zip"; then fetch_ok=yes; echo "download looks like a zip/APK package"; fi
+fi
+[ "$fetch_ok" = "yes" ] || echo "GOOGLE_ONE_FETCH=failed"
+ls -la "$APK" 2>/dev/null || true
+APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | head -1)
+if [ "$fetch_ok" = "yes" ] && [ -n "$APKSIGNER" ]; then
+  echo "--- APK signer certificate:"
+  "$APKSIGNER" verify --print-certs "$APK" 2>/dev/null | head -8 || true
+fi
+if [ "$fetch_ok" = "yes" ]; then
+  adb install -r "$APK" && echo "GOOGLE_ONE_INSTALL=ok" || echo "GOOGLE_ONE_INSTALL=failed"
+  adb shell settings put global device_name "OPPO Find X9 Ultra" || true
+  adb shell monkey -p com.google.android.apps.subscriptions.red -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+  sleep 8
+  adb exec-out screencap -p > "$OUT/screen-googleone-1.png" || true
+  adb shell dumpsys package com.google.android.apps.subscriptions.red 2>/dev/null | grep -E "versionName|versionCode|firstInstallTime|installerPackageName" | head -6 | tee "$OUT/google-one-package.txt" || true
+  adb logcat -d 2>/dev/null | grep -iE "subscriptions.red|GoogleOne|one\.google" | head -40 > "$OUT/google-one-logcat.txt" || true
+fi
 
 {
   echo "# CPH2841 probe summary"

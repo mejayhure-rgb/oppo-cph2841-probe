@@ -27,7 +27,7 @@ jobs:
           echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
           export PATH="$SDK_BIN:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "emulator" "system-images;android-34;google_apis;x86_64"
+          sdkmanager "platform-tools" "emulator" "build-tools;34.0.0" "system-images;android-34;google_apis;x86_64"
 
       - name: Create AVD and launch emulator with CPH2841 launch props
         run: |
