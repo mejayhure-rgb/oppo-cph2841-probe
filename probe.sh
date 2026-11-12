@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v3 — runs in the GitHub Actions job against an
-# emulator the workflow launched manually with -writable-system and -prop flags.
+# OPPO CPH2841 identity probe v4 — runs in the GitHub Actions job against an
+# emulator the workflow launched manually with -writable-system.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
-# AND the runner action's -prop flags had zero effect. v3 therefore launches
-# the emulator directly with -writable-system (the flag designed to make
-# /system writable without unlocking) and passes -prop on that same command
-# line, so both mechanisms are exercised with no middleman.
+# AND the runner action's -prop flags had zero effect. v3 launched the emulator
+# directly with -writable-system. Run #5 (v3) then settled two things from the
+# emulator's own logs: (1) modern emulator -prop accepts ONLY qemu.* props —
+# every ro.* -prop was rejected with a warning, so that mechanism is dead;
+# (2) `adb remount` under -writable-system SUCCEEDS (verity disabled, overlayfs
+# enabled for /system, /vendor, /product) but only takes effect AFTER a reboot
+# ("Now reboot your device for settings to take effect") — v3 checked
+# writability and wrote files before that reboot, so all writes still failed.
+# v4 therefore reorders: remount -> reboot -> verify writable -> write -> reboot
+# -> verdict.
 # The verdict is honest: PROBE_RESULT=IDENTITY_APPLIED only if the post-reboot
 # getprop shows the CPH2841 model AND device; otherwise exit 1.
 set -u
@@ -47,6 +53,11 @@ adb root
 sleep 2
 echo "--- adb remount output:"
 adb remount
+sleep 2
+echo "--- on this image remount enables overlayfs only after a reboot; rebooting, then re-checking"
+adb reboot
+wait_boot || { echo "BOOT_TIMEOUT_AFTER_REMOUNT_REBOOT"; exit 1; }
+adb root
 sleep 2
 if adb shell 'touch /system/.probe_write_test && rm /system/.probe_write_test' 2>/dev/null; then
   echo "SYSTEM_WRITABLE=yes"
