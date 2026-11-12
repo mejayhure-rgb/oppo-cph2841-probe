@@ -21,6 +21,13 @@
 # v5 pairs with workflow v3.3, which grows the AVD data partition to 8G (room
 # for the scratch on /data), and adds df/mount diagnostics after the
 # remount-reboot so the next failure, if any, names itself.
+# Run #7 (v5): diagnostics showed /data had 7.1G free (space was never the
+# issue) and the overlays DO mount after the reboot — but every overlay is
+# mounted RO (overlay on /system type overlay (ro,...)). The standard
+# hardware sequence has one more step in exactly this position: a SECOND
+# `adb remount` after the reboot, which flips the existing overlays rw in the
+# current boot. v6 adds it. If the overlays still come up ro, this family is
+# exhausted and the probe pivots to the Magisk/rootAVD route.
 # The verdict is honest: PROBE_RESULT=IDENTITY_APPLIED only if the post-reboot
 # getprop shows the CPH2841 model AND device; otherwise exit 1.
 set -u
@@ -66,7 +73,10 @@ adb reboot
 wait_boot || { echo "BOOT_TIMEOUT_AFTER_REMOUNT_REBOOT"; exit 1; }
 adb root
 sleep 2
-echo "--- diagnostics after remount + reboot:"
+echo "--- second adb remount in this boot (standard step that flips the overlays rw):"
+adb remount
+sleep 2
+echo "--- diagnostics after remount + reboot + second remount:"
 adb shell 'df -h /data /system 2>/dev/null; echo ---; mount | grep -iE "overlay| /system | /vendor | /product "'
 if adb shell 'touch /system/.probe_write_test && rm /system/.probe_write_test' 2>/dev/null; then
   echo "SYSTEM_WRITABLE=yes"
