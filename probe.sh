@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v10.3 — runs in the GitHub Actions job against an
+# OPPO CPH2841 identity probe v10.4 — runs in the GitHub Actions job against an
 # emulator the workflow launched manually with -writable-system.
 # Run #8 (v6) SUCCEEDED: second remount flipped the overlays rw,
 # SYSTEM_WRITABLE=yes, PROBE_RESULT=IDENTITY_APPLIED with the full verified
@@ -49,6 +49,13 @@
 # instead of Google One's express sign-in), POLLS for each screen with a
 # text timeline in the log instead of fixed sleeps, and captures the
 # sign-in window's logcat — so a bounce becomes diagnosable, not silent.
+# v10.4: run #15 wedged at the same Phase 3 reboot as run #12 — the
+# adb-server restart retry also failed because the GUEST never came
+# back (v10.1's timeouts at least failed it honestly in ~11 min).
+# Phase 3 now syncs before rebooting and, if the guest stays gone,
+# relaunches the emulator process once: the identity writes persist
+# in the AVD's overlayfs, so the relaunched boot should come up
+# already spoofed.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
@@ -212,11 +219,28 @@ echo "--- build.prop on device now contains:"
 adb shell 'grep -h "CPH2841" /system/build.prop /vendor/build.prop /product/etc/build.prop 2>/dev/null | head -20'
 
 echo "### Phase 3: reboot and verify"
+adb shell sync || true
+sleep 3
 timeout 30 adb reboot || true
 if ! wait_boot; then
   echo "--- boot wait failed; restarting the adb server and retrying once"
   adb kill-server; sleep 2; adb start-server
-  wait_boot || { echo "BOOT_TIMEOUT_AFTER_REBOOT"; exit 1; }
+  if ! wait_boot; then
+    echo "--- guest still not back; relaunching the emulator ONCE (identity persists in the AVD overlay)"
+    export ANDROID_AVD_HOME="$HOME/.android/avd"
+    timeout 20 adb emu kill || true
+    pkill -f "emulator -avd probe" || true
+    for i in $(seq 1 6); do pgrep -f "emulator -avd probe" >/dev/null || break; sleep 5; done
+    nohup emulator -avd probe -cores 4 -memory 4096 -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -writable-system \
+      -prop ro.product.model=CPH2841 \
+      -prop ro.product.device=OP627CL1 \
+      -prop ro.product.name=CPH2841EEA \
+      -prop ro.product.manufacturer=OPPO \
+      -prop ro.product.brand=OPPO \
+      -prop "ro.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys" \
+      > "$OUT/emulator-relaunch.log" 2>&1 &
+    wait_boot || { echo "BOOT_TIMEOUT_AFTER_REBOOT"; exit 1; }
+  fi
 fi
 sleep 3
 echo "=== core props (spoofed) ==="
