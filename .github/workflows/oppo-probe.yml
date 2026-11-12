@@ -15,16 +15,29 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Boot emulator and run probe
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: google_apis
-          arch: x86_64
-          profile: pixel_6
-          disable-animations: true
-          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -prop ro.product.model=CPH2841 -prop ro.product.device=OP627CL1 -prop ro.product.name=CPH2841EEA -prop ro.product.manufacturer=OPPO -prop ro.product.brand=OPPO -prop ro.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys
-          script: bash probe.sh
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install emulator and system image
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "emulator" "system-images;android-34;google_apis;x86_64"
+
+      - name: Create AVD and launch emulator with CPH2841 launch props
+        run: |
+          echo no | avdmanager create avd --force -n probe -k "system-images;android-34;google_apis;x86_64" -d pixel_6
+          nohup emulator -avd probe -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -writable-system \
+            -prop ro.product.model=CPH2841 \
+            -prop ro.product.device=OP627CL1 \
+            -prop ro.product.name=CPH2841EEA \
+            -prop ro.product.manufacturer=OPPO \
+            -prop ro.product.brand=OPPO \
+            -prop "ro.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys" \
+            > emulator-launch.log 2>&1 &
+          adb wait-for-device
+
+      - name: Run probe against the emulator
+        run: bash probe.sh
 
       - name: Upload probe results
         if: always()
@@ -32,3 +45,10 @@ jobs:
         with:
           name: cph2841-probe-results
           path: probe-results
+
+      - name: Upload emulator launch log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-launch-log
+          path: emulator-launch.log
