@@ -31,7 +31,13 @@ jobs:
 
       - name: Create AVD and launch emulator with CPH2841 launch props
         run: |
-          echo no | avdmanager create avd --force -n probe -k "system-images;android-34;google_apis;x86_64" -d pixel_6
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | avdmanager create avd --force -n probe -k "system-images;android-34;google_apis;x86_64" -d pixel_6 --path "$ANDROID_AVD_HOME/probe.avd"
+          echo "--- AVDs the emulator can see:"
+          emulator -list-avds
+          echo "--- AVD directory contents:"
+          ls -la "$ANDROID_AVD_HOME"
           nohup emulator -avd probe -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -writable-system \
             -prop ro.product.model=CPH2841 \
             -prop ro.product.device=OP627CL1 \
@@ -40,6 +46,17 @@ jobs:
             -prop ro.product.brand=OPPO \
             -prop "ro.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys" \
             > emulator-launch.log 2>&1 &
+          echo "--- waiting up to 5 minutes for the emulator to register with adb"
+          ok=""
+          for i in $(seq 1 60); do
+            if adb devices | grep -q "^emulator-.*device$"; then ok=1; break; fi
+            sleep 5
+          done
+          if [ -z "$ok" ]; then
+            echo "EMULATOR_NEVER_REGISTERED - emulator launch log follows:"
+            cat emulator-launch.log || true
+            exit 1
+          fi
           adb wait-for-device
 
       - name: Run probe against the emulator
