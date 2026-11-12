@@ -34,6 +34,7 @@ jobs:
           export ANDROID_AVD_HOME="$HOME/.android/avd"
           mkdir -p "$ANDROID_AVD_HOME"
           echo no | avdmanager create avd --force -n probe -k "system-images;android-34;google_apis;x86_64" -d pixel_6 --path "$ANDROID_AVD_HOME/probe.avd"
+          echo "disk.dataPartition.size=8G" >> "$ANDROID_AVD_HOME/probe.avd/config.ini"
           echo "--- AVDs the emulator can see:"
           emulator -list-avds
           echo "--- AVD directory contents:"
