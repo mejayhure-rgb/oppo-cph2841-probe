@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v2 — runs in the GitHub Actions job while the emulator is up.
-# Fix vs v1: run #1's rewrite silently failed because `adb remount` was refused
-# ("Device must be bootloader unlocked") and /system stayed read-only. v2 disables
-# verity first (standard path for google_apis userdebug images), verifies the
-# filesystem is actually writable and that CPH2841 landed in build.prop BEFORE
-# rebooting, and fails the step honestly if the identity does not stick.
-# Identity also comes from emulator -prop launch flags (set in the workflow),
-# so getprop is the judge of both mechanisms combined.
+# OPPO CPH2841 identity probe v3 — runs in the GitHub Actions job against an
+# emulator the workflow launched manually with -writable-system and -prop flags.
+# History: v1's rewrite silently failed (remount refused, /system read-only, run
+# still green). v2 added disable-verity + an honest verdict, and proved BOTH
+# remount and disable-verity are refused ("Device must be bootloader unlocked")
+# AND the runner action's -prop flags had zero effect. v3 therefore launches
+# the emulator directly with -writable-system (the flag designed to make
+# /system writable without unlocking) and passes -prop on that same command
+# line, so both mechanisms are exercised with no middleman.
+# The verdict is honest: PROBE_RESULT=IDENTITY_APPLIED only if the post-reboot
+# getprop shows the CPH2841 model AND device; otherwise exit 1.
 set -u
 OUT="probe-results"
 mkdir -p "$OUT"
@@ -19,112 +22,121 @@ wait_boot() {
     [ "$v" = "1" ] && return 0
     sleep 5
   done
-  echo "WARN: boot_completed not seen within timeout"
+  return 1
 }
 
 core_props() {
-  for k in ro.product.model ro.product.device ro.product.name ro.product.manufacturer \
-           ro.product.brand ro.build.fingerprint ro.build.display.id ro.build.id \
-           ro.build.version.incremental ro.build.version.release ro.build.version.sdk \
+  for p in ro.product.model ro.product.device ro.product.name \
+           ro.product.manufacturer ro.product.brand ro.build.fingerprint \
+           ro.build.display.id ro.build.id ro.build.version.incremental \
+           ro.build.version.release ro.build.version.sdk \
            ro.build.version.security_patch ro.build.description; do
-    printf '%s=%s\n' "$k" "$(adb shell getprop "$k" | tr -d '\r')"
+    echo "$p=$(adb shell getprop $p | tr -d '\r')"
   done
 }
 
-capture() {
-  label="$1"
-  adb shell getprop > "$OUT/getprop-$label.txt" 2>/dev/null
-  core_props > "$OUT/core-$label.txt"
-  adb exec-out screencap -p > "$OUT/screen-$label.png" 2>/dev/null || true
-  echo "=== core props ($label) ==="
-  cat "$OUT/core-$label.txt"
-}
+echo "### Phase 0: baseline (includes whatever the launch -prop flags set)"
+wait_boot || { echo "BOOT_TIMEOUT_BEFORE_BASELINE"; exit 1; }
+echo "=== core props (baseline) ==="
+core_props | tee "$OUT/core-baseline.txt"
+adb shell getprop > "$OUT/getprop-baseline.txt"
+adb exec-out screencap -p > "$OUT/screen-baseline.png" || true
 
-echo "### Phase 0: baseline"
-wait_boot
-capture baseline
-
-echo "### Phase 1: make /system writable (disable-verity path)"
-adb root || true
-adb wait-for-device
-echo "--- adb disable-verity output:"
-adb disable-verity || true
-adb reboot
-wait_boot
-adb root || true
-adb wait-for-device
+echo "### Phase 1: make /system writable (emulator launched with -writable-system)"
+adb root
+sleep 2
 echo "--- adb remount output:"
-adb remount || true
-WRITABLE="no"
-if adb shell "touch /system/.wtest 2>/dev/null && rm /system/.wtest && echo ok" | grep -q ok; then
-  WRITABLE="yes"
+adb remount
+sleep 2
+if adb shell 'touch /system/.probe_write_test && rm /system/.probe_write_test' 2>/dev/null; then
+  echo "SYSTEM_WRITABLE=yes"
+else
+  echo "SYSTEM_WRITABLE=no"
 fi
-echo "SYSTEM_WRITABLE=$WRITABLE"
 
 echo "### Phase 2: apply CPH2841 identity to build.props"
 cat > /tmp/setprops.sh <<'EOS'
 #!/system/bin/sh
-FP='OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys'
-setkv() {
-  if grep -q "^$2=" "$1"; then
-    sed -i "s|^$2=.*|$2=$3|" "$1"
-  fi
-}
-appendkv() {
-  if grep -q "^$2=" "$1"; then
-    sed -i "s|^$2=.*|$2=$3|" "$1"
-  else
-    echo "$2=$3" >> "$1"
-  fi
-}
-for f in /system/build.prop /system/system/build.prop /vendor/build.prop /product/build.prop /system_ext/build.prop /odm/build.prop; do
-  [ -f "$f" ] || continue
-  for part in "" system. vendor. product. system_ext. odm.; do
-    setkv "$f" "ro.product.${part}model" "CPH2841"
-    setkv "$f" "ro.product.${part}device" "OP627CL1"
-    setkv "$f" "ro.product.${part}name" "CPH2841EEA"
-    setkv "$f" "ro.product.${part}manufacturer" "OPPO"
-    setkv "$f" "ro.product.${part}brand" "OPPO"
+apply() {
+  f="$1"
+  [ -f "$f" ] || return 0
+  for kv in \
+    "ro.product.model=CPH2841" \
+    "ro.product.system.model=CPH2841" \
+    "ro.product.vendor.model=CPH2841" \
+    "ro.product.odm.model=CPH2841" \
+    "ro.product.product.model=CPH2841" \
+    "ro.product.system_ext.model=CPH2841" \
+    "ro.product.device=OP627CL1" \
+    "ro.product.system.device=OP627CL1" \
+    "ro.product.vendor.device=OP627CL1" \
+    "ro.product.odm.device=OP627CL1" \
+    "ro.product.product.device=OP627CL1" \
+    "ro.product.system_ext.device=OP627CL1" \
+    "ro.product.name=CPH2841EEA" \
+    "ro.product.system.name=CPH2841EEA" \
+    "ro.product.vendor.name=CPH2841EEA" \
+    "ro.product.odm.name=CPH2841EEA" \
+    "ro.product.product.name=CPH2841EEA" \
+    "ro.product.system_ext.name=CPH2841EEA" \
+    "ro.product.manufacturer=OPPO" \
+    "ro.product.system.manufacturer=OPPO" \
+    "ro.product.vendor.manufacturer=OPPO" \
+    "ro.product.odm.manufacturer=OPPO" \
+    "ro.product.product.manufacturer=OPPO" \
+    "ro.product.system_ext.manufacturer=OPPO" \
+    "ro.product.brand=OPPO" \
+    "ro.product.system.brand=OPPO" \
+    "ro.product.vendor.brand=OPPO" \
+    "ro.product.odm.brand=OPPO" \
+    "ro.product.product.brand=OPPO" \
+    "ro.product.system_ext.brand=OPPO" \
+    "ro.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys" \
+    "ro.system.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys" \
+    "ro.vendor.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys" \
+    "ro.odm.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys" \
+    "ro.product.build.fingerprint=OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys" \
+    "ro.build.display.id=CPH2841_16.0.10.500(EX01)" \
+    "ro.build.id=BP2A.250605.015" \
+    "ro.build.version.incremental=B.R4T2.aef3b8_1a19661_1a14cbd" \
+    "ro.build.version.security_patch=2026-08-01" \
+    "ro.build.version.release=16" \
+    "ro.build.description=CPH2841EEA-user 16 BP2A.250605.015 B.R4T2.aef3b8_1a19661_1a14cbd release-keys" \
+  ; do
+    k="${kv%%=*}"
+    if grep -q "^${k}=" "$f"; then
+      sed -i "s|^${k}=.*|${kv}|" "$f"
+    else
+      echo "${kv}" >> "$f"
+    fi
   done
-  for part in "" system. vendor. product. system_ext. odm. bootimage.; do
-    setkv "$f" "ro.${part}build.fingerprint" "$FP"
-  done
-done
-SYS=/system/build.prop
-[ -f /system/system/build.prop ] && SYS=/system/system/build.prop
-appendkv "$SYS" ro.product.model CPH2841
-appendkv "$SYS" ro.product.device OP627CL1
-appendkv "$SYS" ro.product.name CPH2841EEA
-appendkv "$SYS" ro.product.manufacturer OPPO
-appendkv "$SYS" ro.product.brand OPPO
-appendkv "$SYS" ro.build.fingerprint "$FP"
-appendkv "$SYS" ro.build.display.id 'CPH2841_16.0.10.500(EX01)'
-appendkv "$SYS" ro.build.id BP2A.250605.015
-appendkv "$SYS" ro.build.version.incremental 'B.R4T2.aef3b8_1a19661_1a14cbd'
-appendkv "$SYS" ro.build.version.security_patch 2026-08-01
-appendkv "$SYS" ro.build.version.release 16
-appendkv "$SYS" ro.build.description 'CPH2841EEA-user 16 BP2A.250605.015 B.R4T2.aef3b8_1a19661_1a14cbd release-keys'
-sync
+}
+apply /system/build.prop
+apply /system/system_ext/etc/build.prop
+apply /vendor/build.prop
+apply /vendor/odm/etc/build.prop
+apply /product/etc/build.prop
 EOS
 adb push /tmp/setprops.sh /data/local/tmp/setprops.sh
-adb shell "sh /data/local/tmp/setprops.sh"
+adb shell 'chmod 755 /data/local/tmp/setprops.sh; sh /data/local/tmp/setprops.sh'
 echo "--- build.prop on device now contains:"
-adb shell "grep -h 'CPH2841' /system/build.prop /system/system/build.prop 2>/dev/null | head -20"
+adb shell 'grep -h "CPH2841" /system/build.prop /vendor/build.prop /product/etc/build.prop 2>/dev/null | head -20'
 
 echo "### Phase 3: reboot and verify"
 adb reboot
-wait_boot
-sleep 5
-capture spoofed
+wait_boot || { echo "BOOT_TIMEOUT_AFTER_REBOOT"; exit 1; }
+sleep 3
+echo "=== core props (spoofed) ==="
+core_props | tee "$OUT/core-spoofed.txt"
+adb shell getprop > "$OUT/getprop-spoofed.txt"
+adb exec-out screencap -p > "$OUT/screen-spoofed.png" || true
 
 echo "### Phase 4: Google apps surface (no sign-in)"
-adb shell monkey -p com.android.vending 1 >/dev/null 2>&1 || true
-sleep 8
-adb exec-out screencap -p > "$OUT/screen-playstore-spoofed.png" 2>/dev/null || true
-adb shell pm list packages 2>/dev/null | grep -iE "one|gemini|vending|gms" > "$OUT/google-packages.txt" || true
-cat "$OUT/google-packages.txt" || true
+adb shell pm list packages | grep -iE 'google|vending|gms|android.gms' | sort | tee "$OUT/google-packages.txt"
+adb shell monkey -p com.android.vending -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+sleep 5
+adb exec-out screencap -p > "$OUT/screen-playstore-spoofed.png" || true
 
-echo "### Summary"
 {
   echo "# CPH2841 probe summary"
   echo
@@ -133,14 +145,20 @@ echo "### Summary"
   echo
   echo "## Spoofed"
   cat "$OUT/core-spoofed.txt"
-} > "$OUT/SUMMARY.md"
-cat "$OUT/SUMMARY.md"
+  echo
+  echo "### Verdict"
+  m=$(adb shell getprop ro.product.model | tr -d '\r')
+  d=$(adb shell getprop ro.product.device | tr -d '\r')
+  if [ "$m" = "CPH2841" ] && [ "$d" = "OP627CL1" ]; then
+    echo "PROBE_RESULT=IDENTITY_APPLIED"
+  else
+    echo "PROBE_RESULT=IDENTITY_DID_NOT_APPLY"
+  fi
+} | tee "$OUT/SUMMARY.md"
 
-echo "### Verdict"
-if grep -q "^ro.product.model=CPH2841$" "$OUT/core-spoofed.txt" && grep -q "^ro.product.device=OP627CL1$" "$OUT/core-spoofed.txt"; then
-  echo "PROBE_RESULT=IDENTITY_APPLIED"
-else
-  echo "PROBE_RESULT=IDENTITY_DID_NOT_APPLY"
-  exit 1
+m=$(adb shell getprop ro.product.model | tr -d '\r')
+d=$(adb shell getprop ro.product.device | tr -d '\r')
+if [ "$m" = "CPH2841" ] && [ "$d" = "OP627CL1" ]; then
+  exit 0
 fi
-echo "### Done"
+exit 1
