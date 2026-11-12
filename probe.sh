@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v10 — runs in the GitHub Actions job against an
+# OPPO CPH2841 identity probe v10.1 — runs in the GitHub Actions job against an
 # emulator the workflow launched manually with -writable-system.
 # Run #8 (v6) SUCCEEDED: second remount flipped the overlays rw,
 # SYSTEM_WRITABLE=yes, PROBE_RESULT=IDENTITY_APPLIED with the full verified
@@ -30,6 +30,10 @@
 # the Google One Benefits surface captured by screenshots + UI text.
 # Observation only: Phase 6 never taps Redeem, Claim, Subscribe, Get or
 # Buy, and stops before any payment step.
+# v10.1: run #12 hung forever in Phase 3 — wait_boot's `adb wait-for-device`
+# has no timeout and the emulator never re-registered after the identity
+# reboot. wait_boot now bounds every adb call, Phase 3 retries once after
+# an adb-server restart, and Phase 6's dump/screencap calls get timeouts.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
@@ -65,9 +69,12 @@ mkdir -p "$OUT"
 exec > >(tee -a "$OUT/probe.log") 2>&1
 
 wait_boot() {
-  adb wait-for-device
+  # `adb wait-for-device` has NO built-in timeout: in run #12 the emulator
+  # never re-registered after reboot and it blocked forever. Bound it, and
+  # bound each getprop poll as well.
+  timeout 120 adb wait-for-device || return 1
   for i in $(seq 1 60); do
-    v=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+    v=$(timeout 15 adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
     [ "$v" = "1" ] && return 0
     sleep 5
   done
@@ -190,8 +197,12 @@ echo "--- build.prop on device now contains:"
 adb shell 'grep -h "CPH2841" /system/build.prop /vendor/build.prop /product/etc/build.prop 2>/dev/null | head -20'
 
 echo "### Phase 3: reboot and verify"
-adb reboot
-wait_boot || { echo "BOOT_TIMEOUT_AFTER_REBOOT"; exit 1; }
+timeout 30 adb reboot || true
+if ! wait_boot; then
+  echo "--- boot wait failed; restarting the adb server and retrying once"
+  adb kill-server; sleep 2; adb start-server
+  wait_boot || { echo "BOOT_TIMEOUT_AFTER_REBOOT"; exit 1; }
+fi
 sleep 3
 echo "=== core props (spoofed) ==="
 core_props | tee "$OUT/core-spoofed.txt"
@@ -263,8 +274,8 @@ echo "### Phase 6: throwaway sign-in + Google One Benefits surface (NO redemptio
 if [ -z "${THROWAWAY_EMAIL:-}" ] || [ -z "${THROWAWAY_PASSWORD:-}" ] || [ -z "${THROWAWAY_TOTP_SECRET:-}" ]; then
   echo "SIGNIN_RESULT=skipped_no_secrets"
 else
-  shot() { adb exec-out screencap -p > "$OUT/$1" || true; }
-  ui_dump() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb exec-out cat /sdcard/ui.xml 2>/dev/null; }
+  shot() { timeout 30 adb exec-out screencap -p > "$OUT/$1" || true; }
+  ui_dump() { timeout 25 adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; timeout 15 adb exec-out cat /sdcard/ui.xml 2>/dev/null; }
   cat > /tmp/uihelp.py <<'PYEOF'
 import sys, re, xml.etree.ElementTree as ET
 def center(n):
