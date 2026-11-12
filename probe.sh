@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v10.4 — runs in the GitHub Actions job against an
+# OPPO CPH2841 identity probe v10.5 — runs in the GitHub Actions job against an
 # emulator the workflow launched manually with -writable-system.
 # Run #8 (v6) SUCCEEDED: second remount flipped the overlays rw,
 # SYSTEM_WRITABLE=yes, PROBE_RESULT=IDENTITY_APPLIED with the full verified
@@ -56,6 +56,19 @@
 # relaunches the emulator process once: the identity writes persist
 # in the AVD's overlayfs, so the relaunched boot should come up
 # already spoofed.
+# v10.5: run #16's classic flow WORKED up to the password screen — the
+# email was accepted and the screenshot shows the empty password field
+# waiting — but the password-screen detector missed it ("Enter your
+# password" is the field's HINT, not a text node, so the dump never
+# contained it), and the 2SV loop then fatally tapped "Try another
+# way" on the password screen, walked into the method chooser, and
+# landed on Google's "Couldn't sign you in / didn't provide enough
+# info" risk page. The password was never submitted, so that page is
+# NOT a verdict on the clean flow. v10.5: detect the password screen
+# via "Show password" + read hint attributes in UI texts; the 2SV
+# loop recognizes the risk-gate page as a terminal verdict, handles
+# the method chooser explicitly, and taps "Try another way" at most
+# once — never on the password screen.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
@@ -328,7 +341,8 @@ except Exception:
 mode = sys.argv[1]
 if mode == 'texts':
     for n in root.iter('node'):
-        if n.get('text'): print(n.get('text'))
+        t = n.get('text') or n.get('hint')
+        if t: print(t)
 elif mode == 'tap':
     frag = sys.argv[2].lower()
     cfrag = sys.argv[3].lower() if len(sys.argv) > 3 else ''
@@ -404,7 +418,7 @@ PYEOF
     adb shell input text "$THROWAWAY_EMAIL"; sleep 1
     shot screen-signin-2.png
     tap_text "Next" || true
-    if wait_for "enter your password|forgot password" 90 "password screen"; then
+    if wait_for "show password|enter your password|forgot password" 90 "password screen"; then
       dismiss_anr
       tap_field; sleep 1
       adb shell input text "$THROWAWAY_PASSWORD"; sleep 1
@@ -419,21 +433,35 @@ PYEOF
     shot screen-signin-stuck.png
   fi
   echo "--- 2-Step Verification handling (authenticator TOTP)"
-  for round in 1 2 3; do
+  SIGNIN_VERDICT=""
+  SV_TRIED=0
+  for round in 1 2 3 4; do
     dismiss_anr
     ui_texts > "$OUT/signin-screen-texts-$round.txt" || true
     TXT=$(cat "$OUT/signin-screen-texts-$round.txt")
-    if echo "$TXT" | grep -qiE "authenticator|verification code|enter the code|2-step"; then
+    if echo "$TXT" | grep -qiE "couldn.t sign you in|didn.t provide enough info"; then
+      echo "--- Google risk-gate page reached (terminal for this flow)"
+      SIGNIN_VERDICT="blocked_risk_gate"
+      shot "screen-signin-2sv-$round.png"
+      break
+    fi
+    if echo "$TXT" | grep -qiE "authenticator|verification code|enter the code|2-step|verify it.s you"; then
       if tap_field; then
         CODE=$(totp_now); adb shell input text "$CODE"; unset CODE; sleep 1
         tap_text "Next" || tap_text "Verify" || true
         sleep 8
-      else
-        tap_text "Authenticator" || tap_text "Try another way" || true
+      elif echo "$TXT" | grep -qi "choose how you want to sign in"; then
+        tap_text "Authenticator" || tap_text "Google Authenticator" || true
         sleep 5
+      elif [ "$SV_TRIED" = "0" ]; then
+        SV_TRIED=1
+        tap_text "Try another way" || true
+        sleep 5
+      else
+        break
       fi
-    elif echo "$TXT" | grep -qi "try another way"; then
-      tap_text "Try another way" || true
+    elif echo "$TXT" | grep -qi "choose how you want to sign in"; then
+      tap_text "Authenticator" || tap_text "Google Authenticator" || break
       sleep 5
     else
       break
@@ -453,6 +481,10 @@ PYEOF
   done
   if adb shell dumpsys account 2>/dev/null | grep -q "$THROWAWAY_EMAIL"; then
     echo "SIGNIN_RESULT=account_added"
+  elif [ -n "$SIGNIN_VERDICT" ]; then
+    echo "SIGNIN_RESULT=$SIGNIN_VERDICT"
+    ui_texts > "$OUT/signin-final-texts.txt" || true
+    shot screen-signin-final.png
   else
     echo "SIGNIN_RESULT=not_confirmed"
     ui_texts > "$OUT/signin-final-texts.txt" || true
