@@ -15,11 +15,17 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install emulator and system image
+      - name: Install system image (runner image already ships the Android SDK)
         run: |
+          SDK_BIN=""
+          for d in "$ANDROID_HOME"/cmdline-tools/latest/bin "$ANDROID_HOME"/cmdline-tools/*/bin; do
+            if [ -x "$d/sdkmanager" ]; then SDK_BIN="$d"; break; fi
+          done
+          echo "Using cmdline-tools at: $SDK_BIN"
+          echo "$SDK_BIN" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          export PATH="$SDK_BIN:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" "emulator" "system-images;android-34;google_apis;x86_64"
 
