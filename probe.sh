@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe — runs in the GitHub Actions job while the emulator is up.
-# Phase 0: capture baseline props. Phase 1: rewrite build.props to the verified CPH2841
-# identity and reboot. Phase 2: verify the spoofed props stuck. Phase 3: look at the
-# Google apps surface (no account sign-in in this run).
+# OPPO CPH2841 identity probe v2 — runs in the GitHub Actions job while the emulator is up.
+# Fix vs v1: run #1's rewrite silently failed because `adb remount` was refused
+# ("Device must be bootloader unlocked") and /system stayed read-only. v2 disables
+# verity first (standard path for google_apis userdebug images), verifies the
+# filesystem is actually writable and that CPH2841 landed in build.prop BEFORE
+# rebooting, and fails the step honestly if the identity does not stick.
+# Identity also comes from emulator -prop launch flags (set in the workflow),
+# so getprop is the judge of both mechanisms combined.
 set -u
 OUT="probe-results"
 mkdir -p "$OUT"
@@ -40,11 +44,24 @@ echo "### Phase 0: baseline"
 wait_boot
 capture baseline
 
-echo "### Phase 1: apply CPH2841 identity"
+echo "### Phase 1: make /system writable (disable-verity path)"
 adb root || true
 adb wait-for-device
+echo "--- adb disable-verity output:"
+adb disable-verity || true
+adb reboot
+wait_boot
+adb root || true
+adb wait-for-device
+echo "--- adb remount output:"
 adb remount || true
+WRITABLE="no"
+if adb shell "touch /system/.wtest 2>/dev/null && rm /system/.wtest && echo ok" | grep -q ok; then
+  WRITABLE="yes"
+fi
+echo "SYSTEM_WRITABLE=$WRITABLE"
 
+echo "### Phase 2: apply CPH2841 identity to build.props"
 cat > /tmp/setprops.sh <<'EOS'
 #!/system/bin/sh
 FP='OPPO/CPH2841EEA/OP627CL1:16/BP2A.250605.015/B.R4T2.aef3b8_1a19661_1a14cbd:user/release-keys'
@@ -91,14 +108,16 @@ sync
 EOS
 adb push /tmp/setprops.sh /data/local/tmp/setprops.sh
 adb shell "sh /data/local/tmp/setprops.sh"
+echo "--- build.prop on device now contains:"
+adb shell "grep -h 'CPH2841' /system/build.prop /system/system/build.prop 2>/dev/null | head -20"
 
-echo "### Phase 2: reboot and verify"
+echo "### Phase 3: reboot and verify"
 adb reboot
 wait_boot
 sleep 5
 capture spoofed
 
-echo "### Phase 3: Google apps surface (no sign-in)"
+echo "### Phase 4: Google apps surface (no sign-in)"
 adb shell monkey -p com.android.vending 1 >/dev/null 2>&1 || true
 sleep 8
 adb exec-out screencap -p > "$OUT/screen-playstore-spoofed.png" 2>/dev/null || true
@@ -116,4 +135,12 @@ echo "### Summary"
   cat "$OUT/core-spoofed.txt"
 } > "$OUT/SUMMARY.md"
 cat "$OUT/SUMMARY.md"
+
+echo "### Verdict"
+if grep -q "^ro.product.model=CPH2841$" "$OUT/core-spoofed.txt" && grep -q "^ro.product.device=OP627CL1$" "$OUT/core-spoofed.txt"; then
+  echo "PROBE_RESULT=IDENTITY_APPLIED"
+else
+  echo "PROBE_RESULT=IDENTITY_DID_NOT_APPLY"
+  exit 1
+fi
 echo "### Done"
