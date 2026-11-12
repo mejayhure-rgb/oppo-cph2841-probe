@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v9 — runs in the GitHub Actions job against an
+# OPPO CPH2841 identity probe v10 — runs in the GitHub Actions job against an
 # emulator the workflow launched manually with -writable-system.
 # Run #8 (v6) SUCCEEDED: second remount flipped the overlays rw,
 # SYSTEM_WRITABLE=yes, PROBE_RESULT=IDENTITY_APPLIED with the full verified
@@ -24,6 +24,12 @@
 # base APK requires. v9 installs ALL splits in the bundle (including
 # config.arm64_v8a; the Android 14 x86_64 emulator image carries ARM
 # translation) and fixes the device_name quoting.
+# v10: Phase 6 — throwaway-account sign-in (credentials ONLY from GitHub
+# repo secrets passed as env; never echoed, never committed) with TOTP
+# 2-Step Verification codes generated in-runner from the setup key, then
+# the Google One Benefits surface captured by screenshots + UI text.
+# Observation only: Phase 6 never taps Redeem, Claim, Subscribe, Get or
+# Buy, and stops before any payment step.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
@@ -249,6 +255,124 @@ if [ "$fetch_ok" = "yes" ]; then
   adb exec-out screencap -p > "$OUT/screen-googleone-1.png" || true
   adb shell dumpsys package com.google.android.apps.subscriptions.red 2>/dev/null | grep -E "versionName|versionCode|firstInstallTime|installerPackageName" | head -6 | tee "$OUT/google-one-package.txt" || true
   adb logcat -d 2>/dev/null | grep -iE "subscriptions.red|GoogleOne|one\.google" | head -40 > "$OUT/google-one-logcat.txt" || true
+fi
+
+echo "### Phase 6: throwaway sign-in + Google One Benefits surface (NO redemption)"
+# Credentials come ONLY from env (GitHub repo secrets, workflow v3.5).
+# They are never echoed here; generated TOTP codes are used and unset.
+if [ -z "${THROWAWAY_EMAIL:-}" ] || [ -z "${THROWAWAY_PASSWORD:-}" ] || [ -z "${THROWAWAY_TOTP_SECRET:-}" ]; then
+  echo "SIGNIN_RESULT=skipped_no_secrets"
+else
+  shot() { adb exec-out screencap -p > "$OUT/$1" || true; }
+  ui_dump() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb exec-out cat /sdcard/ui.xml 2>/dev/null; }
+  cat > /tmp/uihelp.py <<'PYEOF'
+import sys, re, xml.etree.ElementTree as ET
+def center(n):
+    m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', n.get('bounds') or '')
+    if not m: return None
+    a, b, c, d = map(int, m.groups()); return ((a + c) // 2, (b + d) // 2)
+try:
+    root = ET.fromstring(sys.stdin.buffer.read().decode('utf-8', 'ignore'))
+except Exception:
+    sys.exit(1)
+mode = sys.argv[1]
+if mode == 'texts':
+    for n in root.iter('node'):
+        if n.get('text'): print(n.get('text'))
+elif mode == 'tap':
+    frag = sys.argv[2].lower()
+    cfrag = sys.argv[3].lower() if len(sys.argv) > 3 else ''
+    for n in root.iter('node'):
+        label = ((n.get('text') or '') + ' ' + (n.get('content-desc') or '')).lower()
+        cls = (n.get('class') or '').lower()
+        if frag in label and (not cfrag or cfrag in cls):
+            c = center(n)
+            if c: print(c[0], c[1]); sys.exit(0)
+    sys.exit(1)
+elif mode == 'field':
+    for n in root.iter('node'):
+        if 'edittext' in (n.get('class') or '').lower():
+            c = center(n)
+            if c: print(c[0], c[1]); sys.exit(0)
+    sys.exit(1)
+PYEOF
+  ui_texts() { ui_dump | python3 /tmp/uihelp.py texts 2>/dev/null; }
+  tap_text() { local xy; xy=$(ui_dump | python3 /tmp/uihelp.py tap "$1" "${2:-}" 2>/dev/null) && [ -n "$xy" ] && adb shell input tap $xy; }
+  tap_field() { local xy; xy=$(ui_dump | python3 /tmp/uihelp.py field 2>/dev/null) && [ -n "$xy" ] && adb shell input tap $xy; }
+  totp_now() {
+    python3 - "$THROWAWAY_TOTP_SECRET" <<'PYEOF'
+import base64, hashlib, hmac, struct, sys, time
+s = sys.argv[1].replace(' ', '').upper()
+s += '=' * ((8 - len(s) % 8) % 8)
+key = base64.b32decode(s)
+d = hmac.new(key, struct.pack('>Q', int(time.time()) // 30), hashlib.sha1).digest()
+o = d[-1] & 0x0F
+print('%06d' % ((struct.unpack('>I', d[o:o + 4])[0] & 0x7FFFFFFF) % 1000000))
+PYEOF
+  }
+  echo "--- launching Google One and tapping Sign In"
+  adb shell monkey -p com.google.android.apps.subscriptions.red -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+  sleep 5; shot screen-signin-0.png
+  tap_text "Sign In" || true
+  sleep 6; shot screen-signin-1.png
+  echo "--- entering email"
+  if tap_field; then sleep 1; adb shell input text "$THROWAWAY_EMAIL"; sleep 1; fi
+  tap_text "Next" || true
+  sleep 6; shot screen-signin-2.png
+  echo "--- entering password"
+  if tap_field; then sleep 1; adb shell input text "$THROWAWAY_PASSWORD"; sleep 1; fi
+  tap_text "Next" || true
+  sleep 8; shot screen-signin-3.png
+  echo "--- 2-Step Verification handling (authenticator TOTP)"
+  for round in 1 2 3; do
+    ui_texts > "$OUT/signin-screen-texts-$round.txt" || true
+    TXT=$(cat "$OUT/signin-screen-texts-$round.txt")
+    if echo "$TXT" | grep -qiE "authenticator|verification code|enter the code|2-step"; then
+      if tap_field; then
+        CODE=$(totp_now); adb shell input text "$CODE"; unset CODE; sleep 1
+        tap_text "Next" || tap_text "Verify" || true
+        sleep 8
+      else
+        tap_text "Authenticator" || tap_text "Try another way" || true
+        sleep 5
+      fi
+    elif echo "$TXT" | grep -qi "try another way"; then
+      tap_text "Try another way" || true
+      sleep 5
+    else
+      break
+    fi
+    shot "screen-signin-2sv-$round.png"
+  done
+  echo "--- post-sign-in interstitials (agree/skip only)"
+  for round in 1 2 3; do
+    if tap_text "I agree"; then sleep 5;
+    elif tap_text "Accept"; then sleep 5;
+    elif tap_text "Agree"; then sleep 5;
+    elif tap_text "No thanks"; then sleep 4;
+    elif tap_text "Not now"; then sleep 4;
+    elif tap_text "Skip"; then sleep 4;
+    else break; fi
+    shot "screen-signin-post-$round.png"
+  done
+  if adb shell dumpsys account 2>/dev/null | grep -q "$THROWAWAY_EMAIL"; then
+    echo "SIGNIN_RESULT=account_added"
+  else
+    echo "SIGNIN_RESULT=not_confirmed"
+    ui_texts > "$OUT/signin-final-texts.txt" || true
+    shot screen-signin-final.png
+  fi
+  echo "--- Google One Benefits surface (observation only)"
+  adb shell monkey -p com.google.android.apps.subscriptions.red -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+  sleep 8; shot screen-benefits-0.png
+  tap_text "Benefits" || true
+  sleep 6; shot screen-benefits-1.png
+  ui_texts > "$OUT/benefits-texts.txt" || true
+  adb shell input swipe 540 1400 540 600 400 || true
+  sleep 3; shot screen-benefits-2.png
+  ui_texts >> "$OUT/benefits-texts.txt" || true
+  echo "--- benefits lines mentioning oppo/offer/trial/month/free:"
+  grep -iE "oppo|offer|trial|month|free" "$OUT/benefits-texts.txt" | head -10 || true
 fi
 
 {

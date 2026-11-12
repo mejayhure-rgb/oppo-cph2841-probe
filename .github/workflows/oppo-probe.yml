@@ -61,6 +61,10 @@ jobs:
           adb wait-for-device
 
       - name: Run probe against the emulator
+        env:
+          THROWAWAY_EMAIL: ${{ secrets.THROWAWAY_EMAIL }}
+          THROWAWAY_PASSWORD: ${{ secrets.THROWAWAY_PASSWORD }}
+          THROWAWAY_TOTP_SECRET: ${{ secrets.THROWAWAY_TOTP_SECRET }}
         run: bash probe.sh
 
       - name: Upload probe results
