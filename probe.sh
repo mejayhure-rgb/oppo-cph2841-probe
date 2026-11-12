@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v10.2 — runs in the GitHub Actions job against an
+# OPPO CPH2841 identity probe v10.3 — runs in the GitHub Actions job against an
 # emulator the workflow launched manually with -writable-system.
 # Run #8 (v6) SUCCEEDED: second remount flipped the overlays rw,
 # SYSTEM_WRITABLE=yes, PROBE_RESULT=IDENTITY_APPLIED with the full verified
@@ -41,6 +41,14 @@
 # watchdog (taps "Wait") before interactions and verifies the email step
 # actually advanced before continuing; workflow v3.6 gives the emulator
 # 4 cores + 4 GB RAM.
+# v10.3: run #14 had no ANR, and the Sign In tap DID fire — screenshots
+# show GMS's "Checking info…" express-sign-in screen — but the flow fell
+# back to the welcome screen without ever presenting an email field to
+# the fixed-sleep script, which then typed into nothing again. Phase 6
+# now enters via Settings → Add account → Google (the classic GMS flow
+# instead of Google One's express sign-in), POLLS for each screen with a
+# text timeline in the log instead of fixed sleeps, and captures the
+# sign-in window's logcat — so a bounce becomes diagnosable, not silent.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
@@ -340,32 +348,52 @@ PYEOF
       fi
     done
   }
-  echo "--- launching Google One and tapping Sign In"
-  adb shell monkey -p com.google.android.apps.subscriptions.red -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
-  sleep 10; dismiss_anr; shot screen-signin-0.png
-  tap_text "Sign In" || true
-  sleep 6; dismiss_anr; shot screen-signin-1.png
-  echo "--- entering email (with advancement check + one retry)"
-  for attempt in 1 2; do
+  timeline() { echo "  [t+${1}s] $(ui_texts | tr '\n' '|' | head -c 300)"; }
+  wait_for() {
+    # $1 = FIELD or a text regex; $2 = max seconds; $3 = label.
+    # Polls the UI, logging a text timeline, until the target appears.
+    local pat="$1" max="$2" label="$3" waited=0
+    while [ "$waited" -lt "$max" ]; do
+      dismiss_anr
+      if [ "$pat" = "FIELD" ]; then
+        if ui_dump | python3 /tmp/uihelp.py field >/dev/null 2>&1; then
+          echo "--- $label: field present after ${waited}s"; return 0
+        fi
+      elif ui_texts | grep -qiE "$pat"; then
+        echo "--- $label: matched /$pat/ after ${waited}s"; return 0
+      fi
+      timeline "$waited"
+      sleep 5; waited=$((waited + 5))
+    done
+    echo "--- $label: TIMEOUT after ${max}s"
+    return 1
+  }
+  adb logcat -c >/dev/null 2>&1 || true
+  echo "--- opening Settings add-account flow (classic GMS sign-in)"
+  adb shell am start -a android.settings.ADD_ACCOUNT_SETTINGS >/dev/null 2>&1 || true
+  sleep 5; dismiss_anr; shot screen-signin-0.png
+  tap_text "Google" || tap_text "Add account" || true
+  sleep 2; tap_text "Google" || true
+  if wait_for FIELD 150 "email screen"; then
     dismiss_anr
-    if tap_field; then sleep 1; adb shell input text "$THROWAWAY_EMAIL"; sleep 1; fi
+    tap_field; sleep 1
+    adb shell input text "$THROWAWAY_EMAIL"; sleep 1
+    shot screen-signin-2.png
     tap_text "Next" || true
-    sleep 7; dismiss_anr
-    if ui_texts | grep -qiE "enter your password|forgot password"; then break; fi
-    if ui_texts | grep -qi "Welcome to Google One"; then
-      echo "--- still on welcome screen; tapping Sign In again (attempt $attempt)"
-      tap_text "Sign In" || true
-      sleep 6; dismiss_anr
+    if wait_for "enter your password|forgot password" 90 "password screen"; then
+      dismiss_anr
+      tap_field; sleep 1
+      adb shell input text "$THROWAWAY_PASSWORD"; sleep 1
+      tap_text "Next" || true
+      sleep 8; dismiss_anr; shot screen-signin-3.png
     else
-      break
+      echo "SIGNIN_FLOW=no_password_screen"
+      shot screen-signin-stuck.png
     fi
-  done
-  shot screen-signin-2.png
-  echo "--- entering password"
-  dismiss_anr
-  if tap_field; then sleep 1; adb shell input text "$THROWAWAY_PASSWORD"; sleep 1; fi
-  tap_text "Next" || true
-  sleep 8; dismiss_anr; shot screen-signin-3.png
+  else
+    echo "SIGNIN_FLOW=no_email_field"
+    shot screen-signin-stuck.png
+  fi
   echo "--- 2-Step Verification handling (authenticator TOTP)"
   for round in 1 2 3; do
     dismiss_anr
@@ -417,6 +445,7 @@ PYEOF
   ui_texts >> "$OUT/benefits-texts.txt" || true
   echo "--- benefits lines mentioning oppo/offer/trial/month/free:"
   grep -iE "oppo|offer|trial|month|free" "$OUT/benefits-texts.txt" | head -10 || true
+  adb logcat -d 2>/dev/null | grep -iE "auth|gms|addaccount|expresssignin|accountmanager|integrity|volley|cronet" | tail -80 > "$OUT/signin-logcat.txt" || true
 fi
 
 {
