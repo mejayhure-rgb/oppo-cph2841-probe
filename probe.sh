@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v7 — runs in the GitHub Actions job against an
+# OPPO CPH2841 identity probe v8 — runs in the GitHub Actions job against an
 # emulator the workflow launched manually with -writable-system.
 # Run #8 (v6) SUCCEEDED: second remount flipped the overlays rw,
 # SYSTEM_WRITABLE=yes, PROBE_RESULT=IDENTITY_APPLIED with the full verified
@@ -12,6 +12,12 @@
 # capture the first screen + package info + filtered logcat — the pre-sign-in
 # offer surface. The eligibility verdict itself still needs a throwaway
 # account, which is a later phase.
+# v8: run #9 (v7) applied the identity incl. the second-order props, but
+# Phase 5 failed — APKPure's download is an XAPK bundle (a zip of split
+# APKs), so the plain install failed to parse it and apksigner printed
+# nothing on the container. v8 detects the bundle, extracts it, verifies
+# the signer on the base APK, and installs base + emulator-compatible
+# splits with install-multiple.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
@@ -196,12 +202,43 @@ fi
 [ "$fetch_ok" = "yes" ] || echo "GOOGLE_ONE_FETCH=failed"
 ls -la "$APK" 2>/dev/null || true
 APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | head -1)
-if [ "$fetch_ok" = "yes" ] && [ -n "$APKSIGNER" ]; then
-  echo "--- APK signer certificate:"
-  "$APKSIGNER" verify --print-certs "$APK" 2>/dev/null | head -8 || true
-fi
 if [ "$fetch_ok" = "yes" ]; then
-  adb install -r "$APK" && echo "GOOGLE_ONE_INSTALL=ok" || echo "GOOGLE_ONE_INSTALL=failed"
+  # APKPure's direct endpoint serves an XAPK bundle (a zip of split APKs),
+  # not a single APK — run #9's plain `adb install` failed to parse the
+  # container and apksigner printed nothing on it. If the download contains
+  # .apk entries, extract it, verify the signer on the BASE apk, and
+  # install-multiple the base + emulator-compatible (x86_64/en/density)
+  # splits. Otherwise treat it as a single APK as before.
+  INSTALL_TARGET="$APK"
+  PARTS=""
+  if unzip -l "$APK" 2>/dev/null | grep -q '\.apk'; then
+    BUNDLE=/tmp/g1bundle
+    rm -rf "$BUNDLE"; mkdir -p "$BUNDLE"
+    unzip -o -q "$APK" -d "$BUNDLE"
+    BASE=$(find "$BUNDLE" -name 'com.google.android.apps.subscriptions.red*.apk' | head -1)
+    [ -z "$BASE" ] && BASE=$(find "$BUNDLE" -name '*.apk' | head -1)
+    if [ -n "$BASE" ]; then
+      INSTALL_TARGET="$BASE"
+      PARTS="$BASE"
+      for s in $(find "$BUNDLE" -name '*.apk' | grep -iE 'x86_64|config\.en|xxhdpi|xxxhdpi'); do
+        [ "$s" != "$BASE" ] && PARTS="$PARTS $s"
+      done
+    fi
+    echo "--- bundle contents:"; find "$BUNDLE" -type f | head -20
+    echo "--- install parts: $PARTS"
+  fi
+  if [ -n "$APKSIGNER" ]; then
+    echo "--- APK signer certificate (on $INSTALL_TARGET):"
+    "$APKSIGNER" verify --print-certs "$INSTALL_TARGET" 2>&1 | head -8
+    echo "GOOGLE_ONE_SIGNER=printed_above"
+  else
+    echo "GOOGLE_ONE_SIGNER=unknown_no_apksigner"
+  fi
+  if [ -n "$PARTS" ]; then
+    adb install-multiple -r $PARTS && echo "GOOGLE_ONE_INSTALL=ok" || echo "GOOGLE_ONE_INSTALL=failed"
+  else
+    adb install -r "$APK" && echo "GOOGLE_ONE_INSTALL=ok" || echo "GOOGLE_ONE_INSTALL=failed"
+  fi
   adb shell settings put global device_name "OPPO Find X9 Ultra" || true
   adb shell monkey -p com.google.android.apps.subscriptions.red -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
   sleep 8
