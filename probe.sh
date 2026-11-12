@@ -14,6 +14,13 @@
 # writability and wrote files before that reboot, so all writes still failed.
 # v4 therefore reorders: remount -> reboot -> verify writable -> write -> reboot
 # -> verdict.
+# Run #6 (v4): SYSTEM_WRITABLE was STILL no after remount + reboot — run #5's
+# remount output explains why: "could not map scratch image", "Failed to
+# allocate scratch on /data, fallback to use free space on super". The overlayfs
+# scratch backing the writable mounts never got created, so nothing persisted.
+# v5 pairs with workflow v3.3, which grows the AVD data partition to 8G (room
+# for the scratch on /data), and adds df/mount diagnostics after the
+# remount-reboot so the next failure, if any, names itself.
 # The verdict is honest: PROBE_RESULT=IDENTITY_APPLIED only if the post-reboot
 # getprop shows the CPH2841 model AND device; otherwise exit 1.
 set -u
@@ -59,6 +66,8 @@ adb reboot
 wait_boot || { echo "BOOT_TIMEOUT_AFTER_REMOUNT_REBOOT"; exit 1; }
 adb root
 sleep 2
+echo "--- diagnostics after remount + reboot:"
+adb shell 'df -h /data /system 2>/dev/null; echo ---; mount | grep -iE "overlay| /system | /vendor | /product "'
 if adb shell 'touch /system/.probe_write_test && rm /system/.probe_write_test' 2>/dev/null; then
   echo "SYSTEM_WRITABLE=yes"
 else
