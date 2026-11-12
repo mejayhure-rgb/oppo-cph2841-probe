@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v8 — runs in the GitHub Actions job against an
+# OPPO CPH2841 identity probe v9 — runs in the GitHub Actions job against an
 # emulator the workflow launched manually with -writable-system.
 # Run #8 (v6) SUCCEEDED: second remount flipped the overlays rw,
 # SYSTEM_WRITABLE=yes, PROBE_RESULT=IDENTITY_APPLIED with the full verified
@@ -18,6 +18,12 @@
 # nothing on the container. v8 detects the bundle, extracts it, verifies
 # the signer on the base APK, and installs base + emulator-compatible
 # splits with install-multiple.
+# v9: run #10 verified the bundle's signer as Google's genuine cert
+# (O=Google Inc., SHA-256 e357f022…) but install failed with
+# INSTALL_FAILED_MISSING_SPLIT — v8's filter excluded the ABI split the
+# base APK requires. v9 installs ALL splits in the bundle (including
+# config.arm64_v8a; the Android 14 x86_64 emulator image carries ARM
+# translation) and fixes the device_name quoting.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
@@ -207,8 +213,9 @@ if [ "$fetch_ok" = "yes" ]; then
   # not a single APK — run #9's plain `adb install` failed to parse the
   # container and apksigner printed nothing on it. If the download contains
   # .apk entries, extract it, verify the signer on the BASE apk, and
-  # install-multiple the base + emulator-compatible (x86_64/en/density)
-  # splits. Otherwise treat it as a single APK as before.
+  # install-multiple ALL splits in the bundle (the base requires its ABI
+  # split — a filtered selection failed with MISSING_SPLIT in run #10).
+  # Otherwise treat it as a single APK as before.
   INSTALL_TARGET="$APK"
   PARTS=""
   if unzip -l "$APK" 2>/dev/null | grep -q '\.apk'; then
@@ -219,10 +226,7 @@ if [ "$fetch_ok" = "yes" ]; then
     [ -z "$BASE" ] && BASE=$(find "$BUNDLE" -name '*.apk' | head -1)
     if [ -n "$BASE" ]; then
       INSTALL_TARGET="$BASE"
-      PARTS="$BASE"
-      for s in $(find "$BUNDLE" -name '*.apk' | grep -iE 'x86_64|config\.en|xxhdpi|xxxhdpi'); do
-        [ "$s" != "$BASE" ] && PARTS="$PARTS $s"
-      done
+      PARTS=$(find "$BUNDLE" -name '*.apk' | sort | tr '\n' ' ')
     fi
     echo "--- bundle contents:"; find "$BUNDLE" -type f | head -20
     echo "--- install parts: $PARTS"
@@ -239,7 +243,7 @@ if [ "$fetch_ok" = "yes" ]; then
   else
     adb install -r "$APK" && echo "GOOGLE_ONE_INSTALL=ok" || echo "GOOGLE_ONE_INSTALL=failed"
   fi
-  adb shell settings put global device_name "OPPO Find X9 Ultra" || true
+  adb shell 'settings put global device_name "OPPO Find X9 Ultra"' || true
   adb shell monkey -p com.google.android.apps.subscriptions.red -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
   sleep 8
   adb exec-out screencap -p > "$OUT/screen-googleone-1.png" || true
