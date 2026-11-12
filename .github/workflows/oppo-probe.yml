@@ -39,7 +39,7 @@ jobs:
           emulator -list-avds
           echo "--- AVD directory contents:"
           ls -la "$ANDROID_AVD_HOME"
-          nohup emulator -avd probe -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -writable-system \
+          nohup emulator -avd probe -cores 4 -memory 4096 -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -writable-system \
             -prop ro.product.model=CPH2841 \
             -prop ro.product.device=OP627CL1 \
             -prop ro.product.name=CPH2841EEA \

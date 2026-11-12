@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OPPO CPH2841 identity probe v10.1 — runs in the GitHub Actions job against an
+# OPPO CPH2841 identity probe v10.2 — runs in the GitHub Actions job against an
 # emulator the workflow launched manually with -writable-system.
 # Run #8 (v6) SUCCEEDED: second remount flipped the overlays rw,
 # SYSTEM_WRITABLE=yes, PROBE_RESULT=IDENTITY_APPLIED with the full verified
@@ -34,6 +34,13 @@
 # has no timeout and the emulator never re-registered after the identity
 # reboot. wait_boot now bounds every adb call, Phase 3 retries once after
 # an adb-server restart, and Phase 6's dump/screencap calls get timeouts.
+# v10.2: run #13 finished cleanly but the sign-in never left the welcome
+# screen — a "System UI isn't responding" dialog (starved 2-core runner)
+# covered every Phase 6 screen, so taps and dumps hit the dialog instead
+# of the app (SIGNIN_RESULT=not_confirmed). Phase 6 now runs an ANR
+# watchdog (taps "Wait") before interactions and verifies the email step
+# actually advanced before continuing; workflow v3.6 gives the emulator
+# 4 cores + 4 GB RAM.
 # History: v1's rewrite silently failed (remount refused, /system read-only, run
 # still green). v2 added disable-verity + an honest verdict, and proved BOTH
 # remount and disable-verity are refused ("Device must be bootloader unlocked")
@@ -321,21 +328,47 @@ o = d[-1] & 0x0F
 print('%06d' % ((struct.unpack('>I', d[o:o + 4])[0] & 0x7FFFFFFF) % 1000000))
 PYEOF
   }
+  dismiss_anr() {
+    # A "System UI isn't responding" dialog covered all of run #13's
+    # Phase 6. If it's up, tap "Wait" (keeps System UI alive) and recheck.
+    for _ in 1 2 3; do
+      if ui_texts | grep -qi "isn't responding"; then
+        tap_text "Wait" || true
+        sleep 4
+      else
+        return 0
+      fi
+    done
+  }
   echo "--- launching Google One and tapping Sign In"
   adb shell monkey -p com.google.android.apps.subscriptions.red -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
-  sleep 5; shot screen-signin-0.png
+  sleep 10; dismiss_anr; shot screen-signin-0.png
   tap_text "Sign In" || true
-  sleep 6; shot screen-signin-1.png
-  echo "--- entering email"
-  if tap_field; then sleep 1; adb shell input text "$THROWAWAY_EMAIL"; sleep 1; fi
-  tap_text "Next" || true
-  sleep 6; shot screen-signin-2.png
+  sleep 6; dismiss_anr; shot screen-signin-1.png
+  echo "--- entering email (with advancement check + one retry)"
+  for attempt in 1 2; do
+    dismiss_anr
+    if tap_field; then sleep 1; adb shell input text "$THROWAWAY_EMAIL"; sleep 1; fi
+    tap_text "Next" || true
+    sleep 7; dismiss_anr
+    if ui_texts | grep -qiE "enter your password|forgot password"; then break; fi
+    if ui_texts | grep -qi "Welcome to Google One"; then
+      echo "--- still on welcome screen; tapping Sign In again (attempt $attempt)"
+      tap_text "Sign In" || true
+      sleep 6; dismiss_anr
+    else
+      break
+    fi
+  done
+  shot screen-signin-2.png
   echo "--- entering password"
+  dismiss_anr
   if tap_field; then sleep 1; adb shell input text "$THROWAWAY_PASSWORD"; sleep 1; fi
   tap_text "Next" || true
-  sleep 8; shot screen-signin-3.png
+  sleep 8; dismiss_anr; shot screen-signin-3.png
   echo "--- 2-Step Verification handling (authenticator TOTP)"
   for round in 1 2 3; do
+    dismiss_anr
     ui_texts > "$OUT/signin-screen-texts-$round.txt" || true
     TXT=$(cat "$OUT/signin-screen-texts-$round.txt")
     if echo "$TXT" | grep -qiE "authenticator|verification code|enter the code|2-step"; then
@@ -375,9 +408,9 @@ PYEOF
   fi
   echo "--- Google One Benefits surface (observation only)"
   adb shell monkey -p com.google.android.apps.subscriptions.red -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
-  sleep 8; shot screen-benefits-0.png
+  sleep 8; dismiss_anr; shot screen-benefits-0.png
   tap_text "Benefits" || true
-  sleep 6; shot screen-benefits-1.png
+  sleep 6; dismiss_anr; shot screen-benefits-1.png
   ui_texts > "$OUT/benefits-texts.txt" || true
   adb shell input swipe 540 1400 540 600 400 || true
   sleep 3; shot screen-benefits-2.png
